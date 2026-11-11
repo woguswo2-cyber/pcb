@@ -44,7 +44,7 @@ def fetch_realtime_fx():
 
             return {
                 "USD": round(krw_per_usd, 2),
-                "JPY": round((krw_per_usd / jpy_per_usd) * 100, 2),  # 100엔 기준
+                "JPY": round((krw_per_usd / jpy_per_usd) * 100, 2),
                 "EUR": round(krw_per_usd / eur_per_usd, 2),
                 "CNY": round(krw_per_usd / cny_per_usd, 2),
                 "KRW": 1.0,
@@ -108,7 +108,7 @@ current_fx = {
     "KRW": 1.0,
 }
 
-# --- 2. 생산 계획 템플릿 세션 관리 ---
+# --- 2. 기본 생산 계획 템플릿 관리 ---
 DEFAULT_ASSYS = ["THS0143301", "E0280014C01"]
 
 if "manual_yearly_plan" not in st.session_state:
@@ -170,7 +170,7 @@ with tab_bom_file:
         except Exception as e:
             st.error(f"엑셀 로드 실패: {e}")
 
-# --- 4. BOM 컬럼 매핑 및 환율 연동 정제 ---
+# --- 4. BOM 컬럼 매핑 및 정제 ---
 df_bom = None
 detected_assys = []
 
@@ -401,57 +401,139 @@ if df_bom is not None and plan_unpivoted is not None and not plan_unpivoted.empt
         )
 
         if view_opt == "소자(Part Number)별 공용품 집계":
-            # 🔥 [핵심]: 각 ASSY별 품번, 단위소요량, 발생 필요수량을 1:1 매핑 리스트로 집계
-            def format_assy_col(sub_df):
-                return "\n".join([str(r["ASSY PART NO"]) for _, r in sub_df.iterrows()])
-
-            def format_usage_col(sub_df):
-                return "\n".join([f"{r['소요량']:g} EA" for _, r in sub_df.iterrows()])
-
-            def format_qty_col(sub_df):
-                return "\n".join([f"{int(r['필요수량']):,} EA" for _, r in sub_df.iterrows()])
-
             summary_rows = []
             for part_no, group in curr_view.groupby("PART NUMBER"):
-                # 동일 ASSY가 중복으로 나오는 경우 합산 정리
-                g_assy = group.groupby("ASSY PART NO").agg({
-                    "소요량": "first",
-                    "필요수량": "sum",
-                    "ASSY PART NAME": "first"
-                }).reset_index()
+                g_assy = (
+                    group.groupby("ASSY PART NO")
+                    .agg({
+                        "소요량": "first",
+                        "필요수량": "sum",
+                        "ASSY PART NAME": "first",
+                    })
+                    .reset_index()
+                )
 
                 total_qty = int(group["필요수량"].sum())
                 total_krw = int(group["원화_총금액"].sum())
-                is_common = "🟢 공용 부품" if len(g_assy) > 1 else "⚪ 전용 부품"
+                is_common = (
+                    "🟢 공용 부품" if len(g_assy) > 1 else "⚪ 전용 부품"
+                )
+
+                # HTML 뱃지/줄바꿈 블록 생성
+                html_assy = "<br>".join([
+                    f"<span style='background-color: #2b2d30; padding: 2px 8px; border-radius: 4px; display: inline-block; margin: 2px 0;'>{a}</span>"
+                    for a in g_assy["ASSY PART NO"]
+                ])
+                html_usage = "<br>".join([
+                    f"<span style='background-color: #2b2d30; padding: 2px 8px; border-radius: 4px; display: inline-block; margin: 2px 0;'>{u:g}</span>"
+                    for u in g_assy["소요량"]
+                ])
+                html_qty = "<br>".join([
+                    f"<span style='background-color: #2b2d30; padding: 2px 8px; border-radius: 4px; display: inline-block; margin: 2px 0;'>{int(q):,}</span>"
+                    for q in g_assy["필요수량"]
+                ])
+
+                # 엑셀 다운로드용 텍스트 (줄바꿈 처리)
+                raw_assy = "\n".join(g_assy["ASSY PART NO"].astype(str))
+                raw_usage = "\n".join(
+                    g_assy["소요량"].apply(lambda x: f"{x:g}")
+                )
+                raw_qty = "\n".join(
+                    g_assy["필요수량"].apply(lambda x: f"{int(x):,}")
+                )
 
                 summary_rows.append({
                     "PART NUMBER": part_no,
                     "제조사 PART NO": group["제조사 PART NO"].iloc[0],
                     "제조사": group["제조사"].iloc[0],
                     "구분": is_common,
-                    "적용 ASSY": "\n".join(g_assy["ASSY PART NO"].astype(str)),
-                    "단위소요량(Usage)": "\n".join(g_assy["소요량"].apply(lambda x: f"{x:g}")),
-                    "ASSY별 소요물량": "\n".join(g_assy["필요수량"].apply(lambda x: f"{int(x):,}")),
-                    f"총 필요 수량 ({sel_period})": total_qty,
+                    "적용 ASSY": html_assy,
+                    "단위소요량(Usage)": html_usage,
+                    "ASSY별 소요물량": html_qty,
+                    f"총 필요 수량 ({sel_period})": f"<b>{total_qty:,} EA</b>",
                     "통화": group["통화"].iloc[0],
-                    "외화단가": group["단가"].iloc[0],
-                    "원화단가(환율적용)": group["원화단가"].iloc[0],
-                    "총 소요금액 (원화)": total_krw
+                    "외화단가": f"{group['단가'].iloc[0]:.5f}",
+                    "원화단가(환율적용)": f"{group['원화단가'].iloc[0]:,.2f}원",
+                    "총 소요금액 (원화)": f"<b>{total_krw:,}원</b>",
+                    # 엑셀용 데이터
+                    "_total_qty_num": total_qty,
+                    "_raw_assy": raw_assy,
+                    "_raw_usage": raw_usage,
+                    "_raw_qty": raw_qty,
+                    "_raw_krw": total_krw,
                 })
 
-            display_df = pd.DataFrame(summary_rows).sort_values(
-                by=f"총 필요 수량 ({sel_period})", ascending=False
+            df_summary = pd.DataFrame(summary_rows).sort_values(
+                by="_total_qty_num", ascending=False
             )
 
-            st.dataframe(
-                display_df.style.format({
-                    "외화단가": "{:.5f}",
-                    "원화단가(환율적용)": "{:,.2f}원",
-                    "총 소요금액 (원화)": "{:,.0f}원",
-                    f"총 필요 수량 ({sel_period})": "{:,} EA",
-                }),
-                use_container_width=True,
-                hide_index=True,
+            # 🔥 완벽한 세로 정렬 및 뱃지 스타일을 위한 HTML Table 직접 렌더링
+            table_cols = [
+                "PART NUMBER",
+                "제조사 PART NO",
+                "제조사",
+                "구분",
+                "적용 ASSY",
+                "단위소요량(Usage)",
+                "ASSY별 소요물량",
+                f"총 필요 수량 ({sel_period})",
+                "통화",
+                "외화단가",
+                "원화단가(환율적용)",
+                "총 소요금액 (원화)",
+            ]
+
+            html_table = """
+            <style>
+                .custom-table { width: 100%; border-collapse: collapse; font-family: sans-serif; font-size: 13.5px; }
+                .custom-table th { background-color: #1e1e1e; color: #a0a0a0; font-weight: 600; padding: 10px 8px; border-bottom: 2px solid #333; text-align: left; }
+                .custom-table td { padding: 10px 8px; border-bottom: 1px solid #2d2d2d; vertical-align: middle; color: #e0e0e0; }
+                .custom-table tr:hover { background-color: #262626; }
+            </style>
+            <table class="custom-table"><thead><tr>
+            """
+            for col in table_cols:
+                html_table += f"<th>{col}</th>"
+            html_table += "</tr></thead><tbody>"
+
+            for _, r in df_summary.iterrows():
+                html_table += "<tr>"
+                for col in table_cols:
+                    align = (
+                        "right"
+                        if "금액" in col or "수량" in col or "단가" in col
+                        else "left"
+                    )
+                    html_table += (
+                        f"<td style='text-align: {align};'>{r[col]}</td>"
+                    )
+                html_table += "</tr>"
+            html_table += "</tbody></table>"
+
+            st.markdown(html_table, unsafe_allow_html=True)
+
+            # 엑셀 내보내기용 정제 DataFrame
+            excel_df = df_summary[[
+                "PART NUMBER",
+                "제조사 PART NO",
+                "제조사",
+                "구분",
+                "_raw_assy",
+                "_raw_usage",
+                "_raw_qty",
+                "_total_qty_num",
+                "통화",
+                "외화단가",
+                "원화단가(환율적용)",
+                "_raw_krw",
+            ]].rename(
+                columns={
+                    "_raw_assy": "적용 ASSY",
+                    "_raw_usage": "단위소요량(Usage)",
+                    "_raw_qty": "ASSY별 소요물량",
+                    "_total_qty_num": f"총 필요 수량 ({sel_period})",
+                    "_raw_krw": "총 소요금액 (원화)",
+                }
             )
 
         else:
@@ -474,7 +556,7 @@ if df_bom is not None and plan_unpivoted is not None and not plan_unpivoted.empt
             curr_view["원화_총금액"] = (
                 curr_view["원화_총금액"].apply(np.ceil).astype(int)
             )
-            display_df = curr_view[final_cols].rename(
+            excel_df = curr_view[final_cols].rename(
                 columns={
                     "소요량": "단위소요량(Usage)",
                     "필요수량": f"필요 수량 ({sel_period})",
@@ -485,7 +567,7 @@ if df_bom is not None and plan_unpivoted is not None and not plan_unpivoted.empt
             ).sort_values(by=f"필요 수량 ({sel_period})", ascending=False)
 
             st.dataframe(
-                display_df.style.format({
+                excel_df.style.format({
                     "단위소요량(Usage)": "{:g}",
                     "외화단가": "{:.5f}",
                     "원화단가(환율적용)": "{:,.2f}원",
@@ -522,7 +604,7 @@ if df_bom is not None and plan_unpivoted is not None and not plan_unpivoted.empt
         # 엑셀 다운로드
         out_buf = io.BytesIO()
         with pd.ExcelWriter(out_buf, engine="openpyxl") as writer:
-            display_df.to_excel(
+            excel_df.to_excel(
                 writer, sheet_name=f"요약_{sel_period}", index=False
             )
             pivot_matrix.to_excel(
