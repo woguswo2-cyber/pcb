@@ -44,7 +44,7 @@ def fetch_realtime_fx():
 
             return {
                 "USD": round(krw_per_usd, 2),
-                "JPY": round((krw_per_usd / jpy_per_usd) * 100, 2),
+                "JPY": round((krw_per_usd / jpy_per_usd) * 100, 2),  # 100엔 기준
                 "EUR": round(krw_per_usd / eur_per_usd, 2),
                 "CNY": round(krw_per_usd / cny_per_usd, 2),
                 "KRW": 1.0,
@@ -108,14 +108,9 @@ current_fx = {
     "KRW": 1.0,
 }
 
-# --- 2. 기본 생산 계획 템플릿 관리 (품번 & 품명 분리) ---
-DEFAULT_PLANS = [
-    {"ASSY PART NO": "THS0143301", "ASSY PART NAME": "MX5 PCB"},
-    {"ASSY PART NO": "E0280014C01", "ASSY PART NAME": "Blower Board"},
-]
-
-if "manual_yearly_plan" not in st.session_state:
-    st.session_state.manual_yearly_plan = pd.DataFrame({
+# --- 2. 기본 생산 계획 템플릿 세션 관리 (KeyError 방어 로직) ---
+def init_yearly_plan():
+    return pd.DataFrame({
         "ASSY PART NO": ["THS0143301", "E0280014C01"],
         "ASSY PART NAME": ["MX5 PCB", "Blower Board"],
         "2026년": [120000, 150000],
@@ -125,7 +120,7 @@ if "manual_yearly_plan" not in st.session_state:
         "2030년": [175000, 210000],
     })
 
-if "manual_monthly_plan" not in st.session_state:
+def init_monthly_plan():
     months = [f"{m}월" for m in range(1, 13)]
     init_data = {
         "ASSY PART NO": ["THS0143301", "E0280014C01"],
@@ -133,7 +128,14 @@ if "manual_monthly_plan" not in st.session_state:
     }
     for m in months:
         init_data[m] = [12500, 15000]
-    st.session_state.manual_monthly_plan = pd.DataFrame(init_data)
+    return pd.DataFrame(init_data)
+
+# 기존 세션에 ASSY PART NAME이 없으면 강제 재설정
+if "manual_yearly_plan" not in st.session_state or "ASSY PART NAME" not in st.session_state.manual_yearly_plan.columns:
+    st.session_state.manual_yearly_plan = init_yearly_plan()
+
+if "manual_monthly_plan" not in st.session_state or "ASSY PART NAME" not in st.session_state.manual_monthly_plan.columns:
+    st.session_state.manual_monthly_plan = init_monthly_plan()
 
 # --- 3. 영역 1: BOM 입력 ---
 st.subheader("1. PCB Assy 하위 BOM 입력")
@@ -264,14 +266,13 @@ if raw_df_bom is not None and not raw_df_bom.empty:
     if "ASSY PART NAME" not in df_bom.columns:
         df_bom["ASSY PART NAME"] = df_bom.get("ASSY PART NO", "-")
 
-    # 고유 Assy (품번 및 품명 딕셔너리)
     detected_assys = (
         df_bom[["ASSY PART NO", "ASSY PART NAME"]]
         .drop_duplicates()
         .to_dict(orient="records")
     )
 
-# --- 5. 영역 2: 생산계획 (품번/품명 칸 분리) ---
+# --- 5. 영역 2: 생산계획 (품번/품명 칸 분리 & KeyError 방어) ---
 st.markdown("---")
 st.subheader("2. 생산 계획 관리 (품번/품명 분리 및 수기 입력 / 엑셀 업로드)")
 
@@ -292,6 +293,9 @@ if plan_input_type == "✍️ 화면에서 수기 직접 입력 (스프레드시
 
     if plan_mode == "연도별 중장기 (2026~2030+)":
         curr_df = st.session_state.manual_yearly_plan.copy()
+        if "ASSY PART NAME" not in curr_df.columns:
+            curr_df.insert(1, "ASSY PART NAME", curr_df["ASSY PART NO"])
+
         if detected_assys:
             for item in detected_assys:
                 a_pn = item["ASSY PART NO"]
@@ -315,25 +319,26 @@ if plan_input_type == "✍️ 화면에서 수기 직접 입력 (스프레드시
             curr_df,
             num_rows="dynamic",
             use_container_width=True,
-            key="editor_yearly",
+            key="editor_yearly_v2",
         )
         st.session_state.manual_yearly_plan = edited_plan
 
-        year_cols = [
-            c
-            for c in edited_plan.columns
-            if c not in ["ASSY PART NO", "ASSY PART NAME"]
-        ]
+        id_vars = [c for c in ["ASSY PART NO", "ASSY PART NAME"] if c in edited_plan.columns]
+        val_vars = [c for c in edited_plan.columns if c not in id_vars]
+
         plan_unpivoted = pd.melt(
             edited_plan,
-            id_vars=["ASSY PART NO", "ASSY PART NAME"],
-            value_vars=year_cols,
+            id_vars=id_vars,
+            value_vars=val_vars,
             var_name="Period",
             value_name="Plan_Qty",
         )
 
     else:
         curr_df = st.session_state.manual_monthly_plan.copy()
+        if "ASSY PART NAME" not in curr_df.columns:
+            curr_df.insert(1, "ASSY PART NAME", curr_df["ASSY PART NO"])
+
         if detected_assys:
             for item in detected_assys:
                 a_pn = item["ASSY PART NO"]
@@ -357,19 +362,17 @@ if plan_input_type == "✍️ 화면에서 수기 직접 입력 (스프레드시
             curr_df,
             num_rows="dynamic",
             use_container_width=True,
-            key="editor_monthly",
+            key="editor_monthly_v2",
         )
         st.session_state.manual_monthly_plan = edited_plan
 
-        month_cols = [
-            c
-            for c in edited_plan.columns
-            if c not in ["ASSY PART NO", "ASSY PART NAME"]
-        ]
+        id_vars = [c for c in ["ASSY PART NO", "ASSY PART NAME"] if c in edited_plan.columns]
+        val_vars = [c for c in edited_plan.columns if c not in id_vars]
+
         plan_unpivoted = pd.melt(
             edited_plan,
-            id_vars=["ASSY PART NO", "ASSY PART NAME"],
-            value_vars=month_cols,
+            id_vars=id_vars,
+            value_vars=val_vars,
             var_name="Period",
             value_name="Plan_Qty",
         )
@@ -383,7 +386,6 @@ else:
             excel_p = pd.read_excel(plan_file)
             excel_p.columns = [str(c).strip() for c in excel_p.columns]
 
-            # 컬럼 매핑 방어
             if "ASSY PART NO" not in excel_p.columns:
                 excel_p.rename(
                     columns={excel_p.columns[0]: "ASSY PART NO"}, inplace=True
@@ -400,14 +402,12 @@ else:
                 if "ASSY PART NAME" not in excel_p.columns:
                     excel_p["ASSY PART NAME"] = excel_p["ASSY PART NO"]
 
-            qty_cols = [
-                c
-                for c in excel_p.columns
-                if c not in ["ASSY PART NO", "ASSY PART NAME"]
-            ]
+            id_vars = [c for c in ["ASSY PART NO", "ASSY PART NAME"] if c in excel_p.columns]
+            qty_cols = [c for c in excel_p.columns if c not in id_vars]
+
             plan_unpivoted = pd.melt(
                 excel_p,
-                id_vars=["ASSY PART NO", "ASSY PART NAME"],
+                id_vars=id_vars,
                 value_vars=qty_cols,
                 var_name="Period",
                 value_name="Plan_Qty",
@@ -422,9 +422,12 @@ if df_bom is not None and plan_unpivoted is not None and not plan_unpivoted.empt
         plan_unpivoted["Plan_Qty"], errors="coerce"
     ).fillna(0)
 
-    # 품번 기준 Join (생산계획 품명 우선, 없을 경우 BOM 품명)
+    # 품번 기준 Merge (생산계획 품명 우선, 없을 경우 BOM 품명)
     bom_match = df_bom.drop(columns=["ASSY PART NAME"], errors="ignore")
     merged = pd.merge(plan_unpivoted, bom_match, on="ASSY PART NO", how="inner")
+
+    if "ASSY PART NAME" not in merged.columns:
+        merged["ASSY PART NAME"] = merged["ASSY PART NO"]
 
     if merged.empty:
         st.warning(
@@ -482,7 +485,7 @@ if df_bom is not None and plan_unpivoted is not None and not plan_unpivoted.empt
                     "🟢 공용 부품" if len(g_assy) > 1 else "⚪ 전용 부품"
                 )
 
-                # HTML 뱃지/줄바꿈 블록 생성 (품번 / 품명 각각 분리)
+                # HTML 뱃지/줄바꿈 블록 생성
                 html_assy_pn = "<br>".join([
                     f"<span style='background-color: #2b2d30; padding: 2px 8px; border-radius: 4px; display: inline-block; margin: 2px 0;'>{a}</span>"
                     for a in g_assy["ASSY PART NO"]
@@ -524,7 +527,6 @@ if df_bom is not None and plan_unpivoted is not None and not plan_unpivoted.empt
                     "외화단가": f"{group['단가'].iloc[0]:.5f}",
                     "원화단가(환율적용)": f"{group['원화단가'].iloc[0]:,.2f}원",
                     "총 소요금액 (원화)": f"<b>{total_krw:,}원</b>",
-                    # 엑셀용 데이터
                     "_total_qty_num": total_qty,
                     "_raw_assy_pn": raw_assy_pn,
                     "_raw_assy_name": raw_assy_name,
@@ -537,7 +539,6 @@ if df_bom is not None and plan_unpivoted is not None and not plan_unpivoted.empt
                 by="_total_qty_num", ascending=False
             )
 
-            # HTML Table
             table_cols = [
                 "EMS PN",
                 "MPN",
