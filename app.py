@@ -1,6 +1,5 @@
 import io
 import json
-import math
 import urllib.request
 import numpy as np
 import pandas as pd
@@ -20,7 +19,6 @@ st.caption(
 # --- 1. 환율 관리 (사이드바) ---
 st.sidebar.header("💱 통화별 환율 설정")
 
-# 기본 사업계획 환율 세션 초기화
 if "fx_rates" not in st.session_state:
     st.session_state.fx_rates = {
         "USD": 1450.0,
@@ -110,7 +108,7 @@ current_fx = {
     "KRW": 1.0,
 }
 
-# --- 2. 기본 생산 계획 템플릿 관리 ---
+# --- 2. 생산 계획 템플릿 세션 관리 ---
 DEFAULT_ASSYS = ["THS0143301", "E0280014C01"]
 
 if "manual_yearly_plan" not in st.session_state:
@@ -140,11 +138,12 @@ raw_df_bom = None
 with tab_bom_paste:
     sample_text = (
         "PART NO\tPART NAME\tPart Number\tmanufacturer part no.\tManufacturer\tper unit\t통화\tprice\n"
+        "THS0143301\tMX5 PCB\tE0424-847-00\tAC0402FR-07100KL\tYAGEO\t10\tUSD\t0.00052\n"
+        "E0280014C01\tBlower Board\tE0424-847-00\tAC0402FR-07100KL\tYAGEO\t10\tUSD\t0.00052\n"
+        "THS0143301\tMX5 PCB\tF0483-185-00\tIPC100N04S5-2R8\tINFINEON\t7\tUSD\t0.21000\n"
+        "E0280014C01\tBlower Board\tF0483-185-00\tIPC100N04S5-2R8\tINFINEON\t7\tUSD\t0.21000\n"
         "THS0143301\tMX5 PCB\tE0401-149-00\tHBY331M1ETR-1010KEGA\tLelon\t4\tUSD\t0.24000\n"
-        "THS0143301\tMX5 PCB\tE0405-009-00\t06031C103K4Z4A\tAVX\t4\tUSD\t0.00650\n"
-        "THS0143301\tMX5 PCB\tE0405-125-00\tGCJ21BR72A104KA01L\tMURATA\t6\tJPY\t1.55000\n"
-        "THS0143301\tMX5 PCB\tE0405-135-00\t06035C332K4T2A\tAVX\t6\tUSD\t0.00540\n"
-        "THS0143301\tMX5 PCB\tE0405-271-00\tC0402C104K4RACAUTO\tKEMET\t2\tUSD\t0.00650"
+        "THS0143301\tMX5 PCB\tE0405-009-00\t06031C103K4Z4A\tAVX\t4\tUSD\t0.00650"
     )
     bom_input_text = st.text_area(
         "엑셀에서 복사한 BOM을 붙여넣으세요 (제목 행 포함)",
@@ -171,7 +170,7 @@ with tab_bom_file:
         except Exception as e:
             st.error(f"엑셀 로드 실패: {e}")
 
-# --- 4. BOM 컬럼 매핑 및 정제 ---
+# --- 4. BOM 컬럼 매핑 및 환율 연동 정제 ---
 df_bom = None
 detected_assys = []
 
@@ -218,7 +217,6 @@ if raw_df_bom is not None and not raw_df_bom.empty:
                     df_bom.rename(columns={col: v}, inplace=True)
                     break
 
-    # 통화 정제 (대문자 처리)
     if "통화" not in df_bom.columns:
         df_bom["통화"] = "KRW"
     else:
@@ -226,7 +224,6 @@ if raw_df_bom is not None and not raw_df_bom.empty:
             df_bom["통화"].astype(str).str.strip().str.upper().fillna("KRW")
         )
 
-    # 기본값 보정
     df_bom["소요량"] = pd.to_numeric(
         df_bom.get("소요량", 1.0), errors="coerce"
     ).fillna(1.0)
@@ -234,7 +231,6 @@ if raw_df_bom is not None and not raw_df_bom.empty:
         df_bom.get("단가", 0.0), errors="coerce"
     ).fillna(0.0)
 
-    # 🔥 [핵심 수정]: 설정된 환율을 반영해 원화단가를 엄격하게 계산 (JPY 100엔 기준 반영)
     def calc_krw_unit_price(row):
         curr = str(row["통화"]).upper()
         p = float(row["단가"])
@@ -390,7 +386,7 @@ if df_bom is not None and plan_unpivoted is not None and not plan_unpivoted.empt
 
         curr_view = merged[merged["Period"] == sel_period].copy()
 
-        # 상단 핵심 메트릭 카드
+        # 메트릭 카드
         col_m1, col_m2, col_m3, col_m4 = st.columns(4)
         col_m1.metric("선택 주기", sel_period)
         col_m2.metric(
@@ -404,65 +400,59 @@ if df_bom is not None and plan_unpivoted is not None and not plan_unpivoted.empt
             f"{int(curr_view['원화_총금액'].sum()):,} 원",
         )
 
-        # 표시용 테이블 서식 처리 (원화단가 소수점 2자리, 금액 정수)
         if view_opt == "소자(Part Number)별 공용품 집계":
-            summary = (
-                curr_view.groupby("PART NUMBER")
-                .agg(
-                    ASSY_PART_NO=(
-                        "ASSY PART NO",
-                        lambda x: ", ".join(sorted(set(str(v) for v in x))),
-                    ),
-                    ASSY_PART_NAME=(
-                        "ASSY PART NAME",
-                        lambda x: ", ".join(sorted(set(str(v) for v in x))),
-                    ),
-                    제조사_PART_NO=("제조사 PART NO", "first"),
-                    제조사=("제조사", "first"),
-                    소요량=("소요량", "sum"),
-                    필요수량=("필요수량", "sum"),
-                    통화=("통화", "first"),
-                    단가=("단가", "first"),
-                    원화단가=("원화단가", "first"),
-                    원화_총금액=("원화_총금액", "sum"),
-                    적용모델수=("ASSY PART NO", "nunique"),
-                )
-                .reset_index()
+            # 🔥 [핵심]: 각 ASSY별 품번, 단위소요량, 발생 필요수량을 1:1 매핑 리스트로 집계
+            def format_assy_col(sub_df):
+                return "\n".join([str(r["ASSY PART NO"]) for _, r in sub_df.iterrows()])
+
+            def format_usage_col(sub_df):
+                return "\n".join([f"{r['소요량']:g} EA" for _, r in sub_df.iterrows()])
+
+            def format_qty_col(sub_df):
+                return "\n".join([f"{int(r['필요수량']):,} EA" for _, r in sub_df.iterrows()])
+
+            summary_rows = []
+            for part_no, group in curr_view.groupby("PART NUMBER"):
+                # 동일 ASSY가 중복으로 나오는 경우 합산 정리
+                g_assy = group.groupby("ASSY PART NO").agg({
+                    "소요량": "first",
+                    "필요수량": "sum",
+                    "ASSY PART NAME": "first"
+                }).reset_index()
+
+                total_qty = int(group["필요수량"].sum())
+                total_krw = int(group["원화_총금액"].sum())
+                is_common = "🟢 공용 부품" if len(g_assy) > 1 else "⚪ 전용 부품"
+
+                summary_rows.append({
+                    "PART NUMBER": part_no,
+                    "제조사 PART NO": group["제조사 PART NO"].iloc[0],
+                    "제조사": group["제조사"].iloc[0],
+                    "구분": is_common,
+                    "적용 ASSY": "\n".join(g_assy["ASSY PART NO"].astype(str)),
+                    "단위소요량(Usage)": "\n".join(g_assy["소요량"].apply(lambda x: f"{x:g}")),
+                    "ASSY별 소요물량": "\n".join(g_assy["필요수량"].apply(lambda x: f"{int(x):,}")),
+                    f"총 필요 수량 ({sel_period})": total_qty,
+                    "통화": group["통화"].iloc[0],
+                    "외화단가": group["단가"].iloc[0],
+                    "원화단가(환율적용)": group["원화단가"].iloc[0],
+                    "총 소요금액 (원화)": total_krw
+                })
+
+            display_df = pd.DataFrame(summary_rows).sort_values(
+                by=f"총 필요 수량 ({sel_period})", ascending=False
             )
 
-            summary["구분"] = summary["적용모델수"].apply(
-                lambda x: "🟢 공용 부품" if x > 1 else "⚪ 전용 부품"
+            st.dataframe(
+                display_df.style.format({
+                    "외화단가": "{:.5f}",
+                    "원화단가(환율적용)": "{:,.2f}원",
+                    "총 소요금액 (원화)": "{:,.0f}원",
+                    f"총 필요 수량 ({sel_period})": "{:,} EA",
+                }),
+                use_container_width=True,
+                hide_index=True,
             )
-            summary["필요수량"] = summary["필요수량"].apply(np.ceil).astype(int)
-            summary["원화_총금액"] = (
-                summary["원화_총금액"].apply(np.ceil).astype(int)
-            )
-
-            final_cols = [
-                "ASSY_PART_NO",
-                "ASSY_PART_NAME",
-                "PART NUMBER",
-                "제조사_PART_NO",
-                "제조사",
-                "구분",
-                "소요량",
-                "필요수량",
-                "통화",
-                "단가",
-                "원화단가",
-                "원화_총금액",
-            ]
-            display_df = summary[final_cols].rename(
-                columns={
-                    "ASSY_PART_NO": "ASSY PART NO",
-                    "ASSY_PART_NAME": "ASSY PART NAME",
-                    "제조사_PART_NO": "제조사 PART NO",
-                    "필요수량": f"필요 수량 ({sel_period})",
-                    "단가": "외화단가",
-                    "원화단가": "원화단가(환율적용)",
-                    "원화_총금액": "총 소요금액 (원화)",
-                }
-            ).sort_values(by=f"필요 수량 ({sel_period})", ascending=False)
 
         else:
             final_cols = [
@@ -486,6 +476,7 @@ if df_bom is not None and plan_unpivoted is not None and not plan_unpivoted.empt
             )
             display_df = curr_view[final_cols].rename(
                 columns={
+                    "소요량": "단위소요량(Usage)",
                     "필요수량": f"필요 수량 ({sel_period})",
                     "단가": "외화단가",
                     "원화단가": "원화단가(환율적용)",
@@ -493,16 +484,17 @@ if df_bom is not None and plan_unpivoted is not None and not plan_unpivoted.empt
                 }
             ).sort_values(by=f"필요 수량 ({sel_period})", ascending=False)
 
-        st.dataframe(
-            display_df.style.format({
-                "외화단가": "{:.5f}",
-                "원화단가(환율적용)": "{:,.2f}원",
-                "총 소요금액 (원화)": "{:,.0f}원",
-                f"필요 수량 ({sel_period})": "{:,} EA",
-            }),
-            use_container_width=True,
-            hide_index=True,
-        )
+            st.dataframe(
+                display_df.style.format({
+                    "단위소요량(Usage)": "{:g}",
+                    "외화단가": "{:.5f}",
+                    "원화단가(환율적용)": "{:,.2f}원",
+                    "총 소요금액 (원화)": "{:,.0f}원",
+                    f"필요 수량 ({sel_period})": "{:,} EA",
+                }),
+                use_container_width=True,
+                hide_index=True,
+            )
 
         # 전체 기간 가로 매트릭스
         with st.expander("📈 [전체 주기별 소요량 매트릭스] Part Number별 추이"):
