@@ -13,7 +13,7 @@ st.set_page_config(
 
 st.title("📊 PCB Assembly 하위 자재 소요량 & 구매금액 트래커")
 st.caption(
-    "효성전기 양산 모터 PCB Assy 자재 집계 | 사업계획/실시간 환율 연동 및 중장기 구매금액 자동 산출"
+    "효성전기 양산 모터 PCB Assy 자재 집계 | 사업계획/실시간 환율 연동 및 제조사별 소요량/구매금액 필터링"
 )
 
 # --- 1. 환율 관리 (사이드바) ---
@@ -44,7 +44,7 @@ def fetch_realtime_fx():
 
             return {
                 "USD": round(krw_per_usd, 2),
-                "JPY": round((krw_per_usd / jpy_per_usd) * 100, 2),
+                "JPY": round((krw_per_usd / jpy_per_usd) * 100, 2),  # 100엔 기준
                 "EUR": round(krw_per_usd / eur_per_usd, 2),
                 "CNY": round(krw_per_usd / cny_per_usd, 2),
                 "KRW": 1.0,
@@ -112,7 +112,7 @@ current_fx = {
 def init_yearly_plan():
     return pd.DataFrame({
         "ASSY PART NO": ["THS0143301", "E0280014C01"],
-        "ASSY PART NAME": ["MX5 CCW", "Blower Board"],
+        "ASSY PART NAME": ["MX5 CCW", "J9 CW"],
         "2026년": [120000, 150000],
         "2027년": [150000, 180000],
         "2028년": [165000, 190000],
@@ -124,7 +124,7 @@ def init_monthly_plan():
     months = [f"{m}월" for m in range(1, 13)]
     init_data = {
         "ASSY PART NO": ["THS0143301", "E0280014C01"],
-        "ASSY PART NAME": ["MX5 CCW", "Blower Board"],
+        "ASSY PART NAME": ["MX5 CCW", "J9 CW"],
     }
     for m in months:
         init_data[m] = [12500, 15000]
@@ -149,15 +149,15 @@ with tab_bom_paste:
         "THS0143301\tMX5 CCW\tE6197-701-01\tLeiterplatte BLDC\t제이앤디써키트\t1\tKRW\t1900\n"
         "THS0143301\tMX5 CCW\tE0424-847-00\tAC0402FR-07100KL\tYAGEO\t10\tUSD\t0.00052\n"
         "THS0143301\tMX5 CCW\tF0483-185-00\tIPC100N04S5-2R8\tINFINEON\t7\tUSD\t0.21000\n"
-        "E0280014C01\tBlower Board\tE0424-847-00\tAC0402FR-07100KL\tYAGEO\t10\tUSD\t0.00052"
+        "E0280014C01\tJ9 CW\tE0424-847-00\tAC0402FR-07100KL\tYAGEO\t10\tUSD\t0.00052\n"
+        "E0280014C01\tJ9 CW\tF0483-185-00\tIPC100N04S5-2R8\tINFINEON\t7\tUSD\t0.21000"
     )
     bom_input_text = st.text_area(
-        "엑셀에서 복사한 BOM을 붙여넣으세요 (제목 행 없이 내용만 넣어도 자동 감지)",
+        "엑셀에서 복사한 BOM을 붙여넣으세요 (제목 행 포함 또는 내용만 붙여넣어도 자동 감지)",
         value=sample_text,
         height=180,
     )
     if bom_input_text.strip():
-        # 먼저 Tab으로 파싱 시도
         try:
             raw_df_bom = pd.read_csv(io.StringIO(bom_input_text), sep="\t", header=None, dtype=str)
         except Exception:
@@ -179,17 +179,14 @@ detected_assys = []
 
 if raw_df_bom is not None and not raw_df_bom.empty:
     first_row = [str(x).strip().upper() for x in raw_df_bom.iloc[0].tolist()]
-    
-    # 첫 행이 헤더인지 여부 확인
     header_keywords = ["PART NO", "ASSY", "모품번", "EMS PN", "PART NUMBER", "USAGE", "소요량", "PRICE", "단가"]
     is_header_present = any(any(kw in cell for kw in header_keywords) for cell in first_row)
-    
+
     if is_header_present:
         headers = [str(x).strip() for x in raw_df_bom.iloc[0].tolist()]
         data_df = raw_df_bom.iloc[1:].copy()
         data_df.columns = headers
     else:
-        # 제목 행 없이 데이터만 바로 복사한 경우: 열 순서로 자동 배치
         data_df = raw_df_bom.copy()
         default_headers = [
             "ASSY PART NO", "ASSY PART NAME", "EMS PN", "MPN",
@@ -203,7 +200,6 @@ if raw_df_bom is not None and not raw_df_bom.empty:
     df_bom = data_df.copy()
     df_bom.columns = [str(c).strip() for c in df_bom.columns]
 
-    # 별칭 매핑
     bom_col_map = {
         "PART NO": "ASSY PART NO", "PART_NO": "ASSY PART NO", "ASSY_PN": "ASSY PART NO", "모품번": "ASSY PART NO",
         "PART NAME": "ASSY PART NAME", "PART_NAME": "ASSY PART NAME", "모품명": "ASSY PART NAME",
@@ -223,7 +219,6 @@ if raw_df_bom is not None and not raw_df_bom.empty:
                 df_bom.rename(columns={col: v}, inplace=True)
                 break
 
-    # 필수 컬럼 강제 보정 (KeyError 원천 차단)
     if "ASSY PART NO" not in df_bom.columns:
         df_bom["ASSY PART NO"] = df_bom.iloc[:, 0].astype(str)
     if "ASSY PART NAME" not in df_bom.columns:
@@ -250,7 +245,6 @@ if raw_df_bom is not None and not raw_df_bom.empty:
     if "단가" not in df_bom.columns:
         df_bom["단가"] = 0.0
 
-    # 숫자형 정제 (콤마 제거 후 변환)
     df_bom["소요량"] = pd.to_numeric(df_bom["소요량"].astype(str).str.replace(",", "").str.strip(), errors="coerce").fillna(1.0)
     df_bom["단가"] = pd.to_numeric(df_bom["단가"].astype(str).str.replace(",", "").str.strip(), errors="coerce").fillna(0.0)
     df_bom["통화"] = df_bom["통화"].astype(str).str.strip().str.upper().fillna("KRW")
@@ -271,14 +265,13 @@ if raw_df_bom is not None and not raw_df_bom.empty:
 
     df_bom["원화단가"] = df_bom.apply(calc_krw_unit_price, axis=1)
 
-    # 고유 Assy 리스트 추출
     detected_assys = (
         df_bom[["ASSY PART NO", "ASSY PART NAME"]]
         .drop_duplicates()
         .to_dict(orient="records")
     )
 
-# --- 5. 영역 2: 생산계획 ---
+# --- 5. 영역 2: 생산계획 (Form 적용으로 버벅거림 100% 제거) ---
 st.markdown("---")
 st.subheader("2. 생산 계획 관리 (품번/품명 분리 및 수기 입력 / 엑셀 업로드)")
 
@@ -314,24 +307,27 @@ if plan_input_type == "✍️ 화면에서 수기 직접 입력 (스프레드시
                     }
                     new_row["ASSY PART NO"] = a_pn
                     new_row["ASSY PART NAME"] = a_name
-                    curr_df = pd.concat(
-                        [curr_df, pd.DataFrame([new_row])], ignore_index=True
-                    )
+                    curr_df = pd.concat([curr_df, pd.DataFrame([new_row])], ignore_index=True)
 
-        st.caption("💡 각 연도별 수량을 더블 클릭해 직접 수정할 수 있습니다.")
-        edited_plan = st.data_editor(
-            curr_df,
-            num_rows="dynamic",
-            use_container_width=True,
-            key="editor_yearly_v3",
-        )
-        st.session_state.manual_yearly_plan = edited_plan
+        st.caption("💡 수량을 자유롭게 수정한 뒤 아래 [🚀 변경사항 저장 및 연산 반영] 버튼을 누르면 렉 없이 즉시 반영됩니다.")
+        with st.form("form_yearly_plan"):
+            edited_plan = st.data_editor(
+                curr_df,
+                num_rows="dynamic",
+                use_container_width=True,
+                key="editor_yearly_v4",
+            )
+            submit_plan = st.form_submit_button("🚀 변경사항 저장 및 소요량 연산 반영")
 
-        id_vars = [c for c in ["ASSY PART NO", "ASSY PART NAME"] if c in edited_plan.columns]
-        val_vars = [c for c in edited_plan.columns if c not in id_vars]
+        if submit_plan:
+            st.session_state.manual_yearly_plan = edited_plan
+
+        active_plan = st.session_state.manual_yearly_plan
+        id_vars = [c for c in ["ASSY PART NO", "ASSY PART NAME"] if c in active_plan.columns]
+        val_vars = [c for c in active_plan.columns if c not in id_vars]
 
         plan_unpivoted = pd.melt(
-            edited_plan,
+            active_plan,
             id_vars=id_vars,
             value_vars=val_vars,
             var_name="Period",
@@ -355,24 +351,27 @@ if plan_input_type == "✍️ 화면에서 수기 직접 입력 (스프레드시
                     }
                     new_row["ASSY PART NO"] = a_pn
                     new_row["ASSY PART NAME"] = a_name
-                    curr_df = pd.concat(
-                        [curr_df, pd.DataFrame([new_row])], ignore_index=True
-                    )
+                    curr_df = pd.concat([curr_df, pd.DataFrame([new_row])], ignore_index=True)
 
-        st.caption("💡 1월~12월 수량을 직접 수정할 수 있습니다.")
-        edited_plan = st.data_editor(
-            curr_df,
-            num_rows="dynamic",
-            use_container_width=True,
-            key="editor_monthly_v3",
-        )
-        st.session_state.manual_monthly_plan = edited_plan
+        st.caption("💡 1월~12월 수량을 수정한 뒤 아래 [🚀 변경사항 저장 및 연산 반영] 버튼을 누르세요.")
+        with st.form("form_monthly_plan"):
+            edited_plan = st.data_editor(
+                curr_df,
+                num_rows="dynamic",
+                use_container_width=True,
+                key="editor_monthly_v4",
+            )
+            submit_plan = st.form_submit_button("🚀 변경사항 저장 및 소요량 연산 반영")
 
-        id_vars = [c for c in ["ASSY PART NO", "ASSY PART NAME"] if c in edited_plan.columns]
-        val_vars = [c for c in edited_plan.columns if c not in id_vars]
+        if submit_plan:
+            st.session_state.manual_monthly_plan = edited_plan
+
+        active_plan = st.session_state.manual_monthly_plan
+        id_vars = [c for c in ["ASSY PART NO", "ASSY PART NAME"] if c in active_plan.columns]
+        val_vars = [c for c in active_plan.columns if c not in id_vars]
 
         plan_unpivoted = pd.melt(
-            edited_plan,
+            active_plan,
             id_vars=id_vars,
             value_vars=val_vars,
             var_name="Period",
@@ -410,13 +409,12 @@ else:
         except Exception as e:
             st.error(f"생산계획 처리 에러: {e}")
 
-# --- 6. 결과 연산 및 표시 ---
+# --- 6. 결과 연산 및 제조사 필터링 분석 ---
 if df_bom is not None and plan_unpivoted is not None and not plan_unpivoted.empty:
     plan_unpivoted["Plan_Qty"] = pd.to_numeric(
         plan_unpivoted["Plan_Qty"].astype(str).str.replace(",", ""), errors="coerce"
     ).fillna(0)
 
-    # 품번 기준 Join
     bom_match = df_bom.drop(columns=["ASSY PART NAME"], errors="ignore")
     merged = pd.merge(plan_unpivoted, bom_match, on="ASSY PART NO", how="inner")
 
@@ -424,7 +422,7 @@ if df_bom is not None and plan_unpivoted is not None and not plan_unpivoted.empt
         merged["ASSY PART NAME"] = merged["ASSY PART NO"]
 
     if merged.empty:
-        st.warning("⚠️ 생산계획의 'ASSY PART NO'와 BOM의 'ASSY PART NO'가 일치하지 않습니다. 상단 표의 품번을 확인해 주십시오.")
+        st.warning("⚠️ 생산계획의 'ASSY PART NO'와 BOM의 'ASSY PART NO'가 일치하지 않습니다.")
     else:
         merged["필요수량"] = merged["Plan_Qty"] * merged["소요량"]
         merged["원화_총금액"] = merged["필요수량"] * merged["원화단가"]
@@ -432,23 +430,47 @@ if df_bom is not None and plan_unpivoted is not None and not plan_unpivoted.empt
         st.markdown("---")
         st.subheader("3. 하위 자재 소요 및 구매금액 분석 결과")
 
+        # 🔍 필터 바: 주기 선택 | 제조사 선택 | 부품 구분 선택
         periods = sorted(merged["Period"].unique().tolist())
-        col_f1, col_f2 = st.columns([2, 4])
+        all_vendors = sorted(list(merged["제조사"].dropna().unique()))
+
+        col_f1, col_f2, col_f3, col_f4 = st.columns([1.5, 2.5, 1.8, 2.2])
+
         with col_f1:
-            sel_period = st.selectbox("📅 분석 대상 주기 선택 (드롭다운)", periods)
+            sel_period = st.selectbox("📅 분석 대상 주기", periods)
+
         with col_f2:
+            sel_vendors = st.multiselect(
+                "🏭 제조사(Vendor) 선택 (복수 선택 가능)",
+                options=all_vendors,
+                default=[],
+                placeholder="전체 제조사 보기"
+            )
+
+        with col_f3:
+            part_type_filter = st.selectbox(
+                "🏷️ 부품 구분",
+                ["전체 품목 보기", "🟢 공용 부품만", "⚪ 전용 부품만"]
+            )
+
+        with col_f4:
             view_opt = st.radio(
                 "보기 모드",
                 ["소자(EMS PN)별 공용품 집계", "상위 Assy별 상세 전개"],
                 horizontal=True,
             )
 
+        # 1차 필터링: 선택 주기
         curr_view = merged[merged["Period"] == sel_period].copy()
 
-        # 메트릭 카드
+        # 2차 필터링: 제조사 드롭다운 선택 반영
+        if sel_vendors:
+            curr_view = curr_view[curr_view["제조사"].isin(sel_vendors)]
+
+        # 메트릭 카드 (선택된 제조사에 맞춰 실시간 계산)
         col_m1, col_m2, col_m3, col_m4 = st.columns(4)
         col_m1.metric("선택 주기", sel_period)
-        col_m2.metric("투입 소자 품목 수", f"{curr_view['EMS PN'].nunique():,} 종")
+        col_m2.metric("조회 품목 수", f"{curr_view['EMS PN'].nunique():,} 종")
         col_m3.metric("총 필요 소요 수량", f"{int(curr_view['필요수량'].sum()):,} EA")
         col_m4.metric("원화 환산 총 구매금액", f"{int(curr_view['원화_총금액'].sum()):,} 원")
 
@@ -467,6 +489,12 @@ if df_bom is not None and plan_unpivoted is not None and not plan_unpivoted.empt
                 total_qty = int(group["필요수량"].sum())
                 total_krw = int(group["원화_총금액"].sum())
                 is_common = "🟢 공용 부품" if len(g_assy) > 1 else "⚪ 전용 부품"
+
+                # 3차 필터링: 공용/전용 부품 필터
+                if part_type_filter == "🟢 공용 부품만" and len(g_assy) <= 1:
+                    continue
+                if part_type_filter == "⚪ 전용 부품만" and len(g_assy) > 1:
+                    continue
 
                 html_assy_pn = "<br>".join([
                     f"<span style='background-color: #2b2d30; padding: 2px 8px; border-radius: 4px; display: inline-block; margin: 2px 0;'>{a}</span>"
@@ -512,51 +540,54 @@ if df_bom is not None and plan_unpivoted is not None and not plan_unpivoted.empt
                     "_raw_krw": total_krw,
                 })
 
-            df_summary = pd.DataFrame(summary_rows).sort_values(
-                by="_total_qty_num", ascending=False
-            )
+            df_summary = pd.DataFrame(summary_rows)
+            if not df_summary.empty:
+                df_summary = df_summary.sort_values(by="_total_qty_num", ascending=False)
 
-            table_cols = [
-                "EMS PN", "MPN", "제조사", "구분",
-                "적용 ASSY 품번", "적용 ASSY 품명", "단위소요량(Usage)", "ASSY별 소요물량",
-                f"총 필요 수량 ({sel_period})", "통화", "외화단가", "원화단가(환율적용)", "총 소요금액 (원화)"
-            ]
+                table_cols = [
+                    "EMS PN", "MPN", "제조사", "구분",
+                    "적용 ASSY 품번", "적용 ASSY 품명", "단위소요량(Usage)", "ASSY별 소요물량",
+                    f"총 필요 수량 ({sel_period})", "통화", "외화단가", "원화단가(환율적용)", "총 소요금액 (원화)"
+                ]
 
-            html_table = """
-            <style>
-                .custom-table { width: 100%; border-collapse: collapse; font-family: sans-serif; font-size: 13.5px; }
-                .custom-table th { background-color: #1e1e1e; color: #a0a0a0; font-weight: 600; padding: 10px 8px; border-bottom: 2px solid #333; text-align: left; }
-                .custom-table td { padding: 10px 8px; border-bottom: 1px solid #2d2d2d; vertical-align: middle; color: #e0e0e0; }
-                .custom-table tr:hover { background-color: #262626; }
-            </style>
-            <table class="custom-table"><thead><tr>
-            """
-            for col in table_cols:
-                html_table += f"<th>{col}</th>"
-            html_table += "</tr></thead><tbody>"
-
-            for _, r in df_summary.iterrows():
-                html_table += "<tr>"
+                html_table = """
+                <style>
+                    .custom-table { width: 100%; border-collapse: collapse; font-family: sans-serif; font-size: 13.5px; }
+                    .custom-table th { background-color: #1e1e1e; color: #a0a0a0; font-weight: 600; padding: 10px 8px; border-bottom: 2px solid #333; text-align: left; }
+                    .custom-table td { padding: 10px 8px; border-bottom: 1px solid #2d2d2d; vertical-align: middle; color: #e0e0e0; }
+                    .custom-table tr:hover { background-color: #262626; }
+                </style>
+                <table class="custom-table"><thead><tr>
+                """
                 for col in table_cols:
-                    align = "right" if ("금액" in col or "수량" in col or "단가" in col) else "left"
-                    html_table += f"<td style='text-align: {align};'>{r[col]}</td>"
-                html_table += "</tr>"
-            html_table += "</tbody></table>"
+                    html_table += f"<th>{col}</th>"
+                html_table += "</tr></thead><tbody>"
 
-            st.markdown(html_table, unsafe_allow_html=True)
+                for _, r in df_summary.iterrows():
+                    html_table += "<tr>"
+                    for col in table_cols:
+                        align = "right" if ("금액" in col or "수량" in col or "단가" in col) else "left"
+                        html_table += f"<td style='text-align: {align};'>{r[col]}</td>"
+                    html_table += "</tr>"
+                html_table += "</tbody></table>"
 
-            excel_df = df_summary[[
-                "EMS PN", "MPN", "제조사", "구분",
-                "_raw_assy_pn", "_raw_assy_name", "_raw_usage", "_raw_qty",
-                "_total_qty_num", "통화", "외화단가", "원화단가(환율적용)", "_raw_krw"
-            ]].rename(columns={
-                "_raw_assy_pn": "적용 ASSY 품번",
-                "_raw_assy_name": "적용 ASSY 품명",
-                "_raw_usage": "단위소요량(Usage)",
-                "_raw_qty": "ASSY별 소요물량",
-                "_total_qty_num": f"총 필요 수량 ({sel_period})",
-                "_raw_krw": "총 소요금액 (원화)"
-            })
+                st.markdown(html_table, unsafe_allow_html=True)
+
+                excel_df = df_summary[[
+                    "EMS PN", "MPN", "제조사", "구분",
+                    "_raw_assy_pn", "_raw_assy_name", "_raw_usage", "_raw_qty",
+                    "_total_qty_num", "통화", "외화단가", "원화단가(환율적용)", "_raw_krw"
+                ]].rename(columns={
+                    "_raw_assy_pn": "적용 ASSY 품번",
+                    "_raw_assy_name": "적용 ASSY 품명",
+                    "_raw_usage": "단위소요량(Usage)",
+                    "_raw_qty": "ASSY별 소요물량",
+                    "_total_qty_num": f"총 필요 수량 ({sel_period})",
+                    "_raw_krw": "총 소요금액 (원화)"
+                })
+            else:
+                st.info("선택한 필터 조건에 해당하는 부품이 없습니다.")
+                excel_df = pd.DataFrame()
 
         else:
             final_cols = [
@@ -589,7 +620,7 @@ if df_bom is not None and plan_unpivoted is not None and not plan_unpivoted.empt
         with st.expander("📈 [전체 주기별 소요량 매트릭스] EMS PN별 추이"):
             pivot_matrix = (
                 pd.pivot_table(
-                    merged,
+                    merged if not sel_vendors else merged[merged["제조사"].isin(sel_vendors)],
                     index=["EMS PN", "MPN", "제조사", "통화", "원화단가"],
                     columns="Period",
                     values="필요수량",
@@ -603,14 +634,15 @@ if df_bom is not None and plan_unpivoted is not None and not plan_unpivoted.empt
             st.dataframe(pivot_matrix, use_container_width=True)
 
         # 엑셀 다운로드
-        out_buf = io.BytesIO()
-        with pd.ExcelWriter(out_buf, engine="openpyxl") as writer:
-            excel_df.to_excel(writer, sheet_name=f"요약_{sel_period}", index=False)
-            pivot_matrix.to_excel(writer, sheet_name="주기별_전체매트릭스", index=False)
+        if not excel_df.empty:
+            out_buf = io.BytesIO()
+            with pd.ExcelWriter(out_buf, engine="openpyxl") as writer:
+                excel_df.to_excel(writer, sheet_name=f"요약_{sel_period}", index=False)
+                pivot_matrix.to_excel(writer, sheet_name="주기별_전체매트릭스", index=False)
 
-        st.download_button(
-            label=f"📥 [{sel_period}] 결과 엑셀 다운로드",
-            data=out_buf.getvalue(),
-            file_name=f"PCB_하위자재_소요량_{sel_period}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+            st.download_button(
+                label=f"📥 [{sel_period}] 필터링 결과 엑셀 다운로드",
+                data=out_buf.getvalue(),
+                file_name=f"PCB_자재소요량_{sel_period}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
