@@ -150,7 +150,7 @@ with tab_bom_paste:
         "THS0143301\tMX5 CCW\tE0424-847-00\tAC0402FR-07100KL\tYAGEO\t10\tUSD\t0.00052\n"
         "THS0143301\tMX5 CCW\tF0483-185-00\tIPC100N04S5-2R8\tINFINEON\t7\tUSD\t0.21000\n"
         "E0280014C01\tJ9 CW\tE0424-847-00\tAC0402FR-07100KL\tYAGEO\t10\tUSD\t0.00052\n"
-        "E0280014C01\tJ9 CW\tF0483-185-00\tIPC100N04S5-2R8\tINFINEON\t7\tUSD\t0.21000"
+        "E0280014C01\tJ9 CW\tF0483-185-00\tIPC100N04S5-2R8\tInfineon\t7\tUSD\t0.21000"
     )
     bom_input_text = st.text_area(
         "엑셀에서 복사한 BOM을 붙여넣으세요 (제목 행 포함 또는 내용만 붙여넣어도 자동 감지)",
@@ -245,6 +245,9 @@ if raw_df_bom is not None and not raw_df_bom.empty:
     if "단가" not in df_bom.columns:
         df_bom["단가"] = 0.0
 
+    # 🔥 핵심: 제조사 대소문자 통일 (INFINEON == Infineon) 및 공백 제거
+    df_bom["제조사"] = df_bom["제조사"].astype(str).str.strip().str.upper()
+
     df_bom["소요량"] = pd.to_numeric(df_bom["소요량"].astype(str).str.replace(",", "").str.strip(), errors="coerce").fillna(1.0)
     df_bom["단가"] = pd.to_numeric(df_bom["단가"].astype(str).str.replace(",", "").str.strip(), errors="coerce").fillna(0.0)
     df_bom["통화"] = df_bom["통화"].astype(str).str.strip().str.upper().fillna("KRW")
@@ -271,7 +274,7 @@ if raw_df_bom is not None and not raw_df_bom.empty:
         .to_dict(orient="records")
     )
 
-# --- 5. 영역 2: 생산계획 (Form 적용으로 버벅거림 100% 제거) ---
+# --- 5. 영역 2: 생산계획 ---
 st.markdown("---")
 st.subheader("2. 생산 계획 관리 (품번/품명 분리 및 수기 입력 / 엑셀 업로드)")
 
@@ -315,7 +318,7 @@ if plan_input_type == "✍️ 화면에서 수기 직접 입력 (스프레드시
                 curr_df,
                 num_rows="dynamic",
                 use_container_width=True,
-                key="editor_yearly_v4",
+                key="editor_yearly_v5",
             )
             submit_plan = st.form_submit_button("🚀 변경사항 저장 및 소요량 연산 반영")
 
@@ -359,7 +362,7 @@ if plan_input_type == "✍️ 화면에서 수기 직접 입력 (스프레드시
                 curr_df,
                 num_rows="dynamic",
                 use_container_width=True,
-                key="editor_monthly_v4",
+                key="editor_monthly_v5",
             )
             submit_plan = st.form_submit_button("🚀 변경사항 저장 및 소요량 연산 반영")
 
@@ -430,9 +433,9 @@ if df_bom is not None and plan_unpivoted is not None and not plan_unpivoted.empt
         st.markdown("---")
         st.subheader("3. 하위 자재 소요 및 구매금액 분석 결과")
 
-        # 🔍 필터 바: 주기 선택 | 제조사 선택 | 부품 구분 선택
         periods = sorted(merged["Period"].unique().tolist())
-        all_vendors = sorted(list(merged["제조사"].dropna().unique()))
+        # 제조사 중복 없이 대문자 기준 정렬
+        all_vendors = sorted(list(set(v for v in merged["제조사"].dropna() if v != "-")))
 
         col_f1, col_f2, col_f3, col_f4 = st.columns([1.5, 2.5, 1.8, 2.2])
 
@@ -441,7 +444,7 @@ if df_bom is not None and plan_unpivoted is not None and not plan_unpivoted.empt
 
         with col_f2:
             sel_vendors = st.multiselect(
-                "🏭 제조사(Vendor) 선택 (복수 선택 가능)",
+                "🏭 제조사(Vendor) 선택 (대소문자 통합)",
                 options=all_vendors,
                 default=[],
                 placeholder="전체 제조사 보기"
@@ -460,14 +463,12 @@ if df_bom is not None and plan_unpivoted is not None and not plan_unpivoted.empt
                 horizontal=True,
             )
 
-        # 1차 필터링: 선택 주기
         curr_view = merged[merged["Period"] == sel_period].copy()
 
-        # 2차 필터링: 제조사 드롭다운 선택 반영
+        # 제조사 필터링 (대문자 기준 비교)
         if sel_vendors:
             curr_view = curr_view[curr_view["제조사"].isin(sel_vendors)]
 
-        # 메트릭 카드 (선택된 제조사에 맞춰 실시간 계산)
         col_m1, col_m2, col_m3, col_m4 = st.columns(4)
         col_m1.metric("선택 주기", sel_period)
         col_m2.metric("조회 품목 수", f"{curr_view['EMS PN'].nunique():,} 종")
@@ -490,7 +491,6 @@ if df_bom is not None and plan_unpivoted is not None and not plan_unpivoted.empt
                 total_krw = int(group["원화_총금액"].sum())
                 is_common = "🟢 공용 부품" if len(g_assy) > 1 else "⚪ 전용 부품"
 
-                # 3차 필터링: 공용/전용 부품 필터
                 if part_type_filter == "🟢 공용 부품만" and len(g_assy) <= 1:
                     continue
                 if part_type_filter == "⚪ 전용 부품만" and len(g_assy) > 1:
