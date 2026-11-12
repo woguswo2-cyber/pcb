@@ -1,5 +1,6 @@
 import io
 import json
+import re
 import urllib.request
 import numpy as np
 import pandas as pd
@@ -13,10 +14,73 @@ st.set_page_config(
 
 st.title("📊 PCB Assembly 하위 자재 소요량 & 구매금액 트래커")
 st.caption(
-    "효성전기 양산 모터 PCB Assy 자재 집계 | 사업계획/실시간 환율 연동 및 제조사별 소요량/구매금액 필터링"
+    "효성전기 양산 모터 PCB Assy 자재 집계 | 사업계획/실시간 환율 연동 및 제조사 표준화 클렌징"
 )
 
-# --- 1. 환율 관리 (사이드바) ---
+# --- 1. 제조사명 정규화 (클렌징 엔진) ---
+def normalize_vendor_name(vendor_raw):
+    """
+    제조사 오탈자, 다국어 문자(움라우트), 법인격 표기(INC, LTD 등)를 단일 대표명으로 통일
+    """
+    if pd.isna(vendor_raw) or not str(vendor_raw).strip():
+        return "-"
+    
+    name = str(vendor_raw).strip().upper()
+    
+    # 1) 특수 외래어 알파벳 치환
+    accent_map = {
+        'Ü': 'U', 'Ö': 'O', 'Ä': 'A', 'É': 'E', 'È': 'E', 'Ê': 'E',
+        'Ç': 'C', 'Å': 'A', 'Ø': 'O', 'ß': 'SS'
+    }
+    for orig, repl in accent_map.items():
+        name = name.replace(orig, repl)
+        
+    # 2) 기호 정제 (마침표, 쉼표, 괄호 등 정리)
+    name = re.sub(r'[,()\/]', ' ', name)
+    name = re.sub(r'\s+', ' ', name).strip()
+    
+    # 3) 실무 대표 제조사 Alias 사전
+    alias_dict = {
+        "DIODES": ["DIODES", "DIODES INC", "DIODES INC.", "DIODES INCORPORATED"],
+        "STMICROELECTRONICS": ["ST", "STM", "ST MICRO", "ST MICROELECTRONIC", "ST MICROELECTRONICS", "STMICROELECTRONICS", "STMICRO"],
+        "ISABELLENHUTTE": ["ISABELLENHUTTE", "ISABELLENHUETTE", "ISA"],
+        "INFINEON": ["INFINEON", "INFINEON TECH", "INFINEON TECHNOLOGIES", "IFX"],
+        "MURATA": ["MURATA", "MURATA MFG", "MURATA ELECTRONICS"],
+        "YAGEO": ["YAGEO", "YAGEO CORP", "YAGEO CORPORATION"],
+        "AVX": ["AVX", "AVX CORP", "KYOCERA AVX"],
+        "KEMET": ["KEMET", "KEMET ELECTRONICS", "YAGEO KEMET"],
+        "TAIYO YUDEN": ["TAIYO", "TAIYO YUDEN", "TAIYOYUDEN"],
+        "TDK": ["TDK", "TDK CORP", "TDK CORPORATION"],
+        "VISHAY": ["VISHAY", "VISHAY INTERTECHNOLOGY", "VISHAY DALE"],
+        "ROHM": ["ROHM", "ROHM SEMICONDUCTOR"],
+        "NXP": ["NXP", "NXP SEMICONDUCTORS"],
+        "TI": ["TI", "TEXAS INSTRUMENTS", "TEXAS INSTRUMENT"],
+        "ON SEMI": ["ON", "ON SEMI", "ONSEMI", "ON SEMICONDUCTOR"],
+        "LELON": ["LELON", "LELON ELECTRONICS"],
+        "RUBYCON": ["RUBYCON", "RUBYCON CORP"],
+        "SAMWHA": ["SAMWHA", "삼화", "삼화전기", "삼화콘덴서"],
+        "SAMYOUNG": ["SAMYOUNG", "삼영", "삼영전자"],
+        "JND": ["제이앤디", "제이앤디써키트", "JND CIRCUITS", "JND"],
+        "KCE": ["KCE", "KCE PCB"],
+        "USI": ["USI", "USI PCB"]
+    }
+    
+    # 딕셔너리 완전/포함 일치 매핑
+    for master, aliases in alias_dict.items():
+        if name in aliases:
+            return master
+        for a in aliases:
+            # 단어 단위 일치 검사
+            if re.search(rf'\b{re.escape(a)}\b', name):
+                return master
+
+    # 4) 일반 법인격 접미사 제거 (사전에 없는 신규 벤더 대응)
+    name = re.sub(r'\b(INC\.?|CORP\.?|CORPORATION|LTD\.?|LIMITED|CO\.?|LLC|GMBH)\b', '', name).strip()
+    name = re.sub(r'\s+', ' ', name).strip()
+    
+    return name if name else "-"
+
+# --- 2. 환율 관리 (사이드바) ---
 st.sidebar.header("💱 통화별 환율 설정")
 
 if "fx_rates" not in st.session_state:
@@ -44,7 +108,7 @@ def fetch_realtime_fx():
 
             return {
                 "USD": round(krw_per_usd, 2),
-                "JPY": round((krw_per_usd / jpy_per_usd) * 100, 2),  # 100엔 기준
+                "JPY": round((krw_per_usd / jpy_per_usd) * 100, 2),
                 "EUR": round(krw_per_usd / eur_per_usd, 2),
                 "CNY": round(krw_per_usd / cny_per_usd, 2),
                 "KRW": 1.0,
@@ -108,7 +172,7 @@ current_fx = {
     "KRW": 1.0,
 }
 
-# --- 2. 기본 생산 계획 템플릿 관리 ---
+# --- 3. 기본 생산 계획 템플릿 관리 ---
 def init_yearly_plan():
     return pd.DataFrame({
         "ASSY PART NO": ["THS0143301", "E0280014C01"],
@@ -136,7 +200,7 @@ if "manual_yearly_plan" not in st.session_state or "ASSY PART NAME" not in st.se
 if "manual_monthly_plan" not in st.session_state or "ASSY PART NAME" not in st.session_state.manual_monthly_plan.columns:
     st.session_state.manual_monthly_plan = init_monthly_plan()
 
-# --- 3. 영역 1: BOM 입력 ---
+# --- 4. 영역 1: BOM 입력 ---
 st.subheader("1. PCB Assy 하위 BOM 입력")
 tab_bom_paste, tab_bom_file = st.tabs(
     ["📋 BOM 텍스트 붙여넣기", "📂 BOM 엑셀 업로드 (.xlsx)"]
@@ -149,8 +213,14 @@ with tab_bom_paste:
         "THS0143301\tMX5 CCW\tE6197-701-01\tLeiterplatte BLDC\t제이앤디써키트\t1\tKRW\t1900\n"
         "THS0143301\tMX5 CCW\tE0424-847-00\tAC0402FR-07100KL\tYAGEO\t10\tUSD\t0.00052\n"
         "THS0143301\tMX5 CCW\tF0483-185-00\tIPC100N04S5-2R8\tINFINEON\t7\tUSD\t0.21000\n"
-        "E0280014C01\tJ9 CW\tE0424-847-00\tAC0402FR-07100KL\tYAGEO\t10\tUSD\t0.00052\n"
-        "E0280014C01\tJ9 CW\tF0483-185-00\tIPC100N04S5-2R8\tInfineon\t7\tUSD\t0.21000"
+        "E0280014C01\tJ9 CW\tE0424-847-00\tAC0402FR-07100KL\tYageo\t10\tUSD\t0.00052\n"
+        "E0280014C01\tJ9 CW\tF0483-185-00\tIPC100N04S5-2R8\tInfineon\t7\tUSD\t0.21000\n"
+        "THS0143301\tMX5 CCW\tD0101-001-00\tBAT54WS\tDIODES INC.\t2\tUSD\t0.01500\n"
+        "E0280014C01\tJ9 CW\tD0101-001-00\tBAT54WS\tDIODES\t2\tUSD\t0.01500\n"
+        "THS0143301\tMX5 CCW\tM0101-002-00\tSTM32F405\tST MICROELECTRONICS\t1\tUSD\t1.50000\n"
+        "E0280014C01\tJ9 CW\tM0101-002-00\tSTM32F405\tST MICROELECTRONIC\t1\tUSD\t1.50000\n"
+        "THS0143301\tMX5 CCW\tR0101-003-00\tBVS-I-R001\tISABELLENHÜTTE\t1\tEUR\t0.45000\n"
+        "E0280014C01\tJ9 CW\tR0101-003-00\tBVS-I-R001\tISABELLENHUTTE\t1\tEUR\t0.45000"
     )
     bom_input_text = st.text_area(
         "엑셀에서 복사한 BOM을 붙여넣으세요 (제목 행 포함 또는 내용만 붙여넣어도 자동 감지)",
@@ -173,7 +243,7 @@ with tab_bom_file:
         except Exception as e:
             st.error(f"엑셀 로드 실패: {e}")
 
-# --- 4. BOM 스마트 컬럼 감지 및 무적 매핑 ---
+# --- 5. BOM 스마트 컬럼 감지 & 제조사 표준화 클렌징 적용 ---
 df_bom = None
 detected_assys = []
 
@@ -245,8 +315,8 @@ if raw_df_bom is not None and not raw_df_bom.empty:
     if "단가" not in df_bom.columns:
         df_bom["단가"] = 0.0
 
-    # 🔥 핵심: 제조사 대소문자 통일 (INFINEON == Infineon) 및 공백 제거
-    df_bom["제조사"] = df_bom["제조사"].astype(str).str.strip().str.upper()
+    # 🔥 [핵심]: 제조사 정규화 클렌징 엔진 적용
+    df_bom["제조사"] = df_bom["제조사"].apply(normalize_vendor_name)
 
     df_bom["소요량"] = pd.to_numeric(df_bom["소요량"].astype(str).str.replace(",", "").str.strip(), errors="coerce").fillna(1.0)
     df_bom["단가"] = pd.to_numeric(df_bom["단가"].astype(str).str.replace(",", "").str.strip(), errors="coerce").fillna(0.0)
@@ -274,7 +344,7 @@ if raw_df_bom is not None and not raw_df_bom.empty:
         .to_dict(orient="records")
     )
 
-# --- 5. 영역 2: 생산계획 ---
+# --- 6. 영역 2: 생산계획 ---
 st.markdown("---")
 st.subheader("2. 생산 계획 관리 (품번/품명 분리 및 수기 입력 / 엑셀 업로드)")
 
@@ -318,7 +388,7 @@ if plan_input_type == "✍️ 화면에서 수기 직접 입력 (스프레드시
                 curr_df,
                 num_rows="dynamic",
                 use_container_width=True,
-                key="editor_yearly_v5",
+                key="editor_yearly_v6",
             )
             submit_plan = st.form_submit_button("🚀 변경사항 저장 및 소요량 연산 반영")
 
@@ -362,7 +432,7 @@ if plan_input_type == "✍️ 화면에서 수기 직접 입력 (스프레드시
                 curr_df,
                 num_rows="dynamic",
                 use_container_width=True,
-                key="editor_monthly_v5",
+                key="editor_monthly_v6",
             )
             submit_plan = st.form_submit_button("🚀 변경사항 저장 및 소요량 연산 반영")
 
@@ -412,7 +482,7 @@ else:
         except Exception as e:
             st.error(f"생산계획 처리 에러: {e}")
 
-# --- 6. 결과 연산 및 제조사 필터링 분석 ---
+# --- 7. 결과 연산 및 제조사 필터링 분석 ---
 if df_bom is not None and plan_unpivoted is not None and not plan_unpivoted.empty:
     plan_unpivoted["Plan_Qty"] = pd.to_numeric(
         plan_unpivoted["Plan_Qty"].astype(str).str.replace(",", ""), errors="coerce"
@@ -434,7 +504,7 @@ if df_bom is not None and plan_unpivoted is not None and not plan_unpivoted.empt
         st.subheader("3. 하위 자재 소요 및 구매금액 분석 결과")
 
         periods = sorted(merged["Period"].unique().tolist())
-        # 제조사 중복 없이 대문자 기준 정렬
+        # 정제된 고유 제조사 목록
         all_vendors = sorted(list(set(v for v in merged["제조사"].dropna() if v != "-")))
 
         col_f1, col_f2, col_f3, col_f4 = st.columns([1.5, 2.5, 1.8, 2.2])
@@ -444,7 +514,7 @@ if df_bom is not None and plan_unpivoted is not None and not plan_unpivoted.empt
 
         with col_f2:
             sel_vendors = st.multiselect(
-                "🏭 제조사(Vendor) 선택 (대소문자 통합)",
+                "🏭 제조사(Vendor) 선택 (표준화 통합 완료)",
                 options=all_vendors,
                 default=[],
                 placeholder="전체 제조사 보기"
@@ -465,7 +535,6 @@ if df_bom is not None and plan_unpivoted is not None and not plan_unpivoted.empt
 
         curr_view = merged[merged["Period"] == sel_period].copy()
 
-        # 제조사 필터링 (대문자 기준 비교)
         if sel_vendors:
             curr_view = curr_view[curr_view["제조사"].isin(sel_vendors)]
 
