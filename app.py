@@ -44,7 +44,7 @@ def fetch_realtime_fx():
 
             return {
                 "USD": round(krw_per_usd, 2),
-                "JPY": round((krw_per_usd / jpy_per_usd) * 100, 2),  # 100엔 기준
+                "JPY": round((krw_per_usd / jpy_per_usd) * 100, 2),
                 "EUR": round(krw_per_usd / eur_per_usd, 2),
                 "CNY": round(krw_per_usd / cny_per_usd, 2),
                 "KRW": 1.0,
@@ -108,11 +108,11 @@ current_fx = {
     "KRW": 1.0,
 }
 
-# --- 2. 기본 생산 계획 템플릿 세션 관리 (KeyError 방어 로직) ---
+# --- 2. 기본 생산 계획 템플릿 관리 ---
 def init_yearly_plan():
     return pd.DataFrame({
         "ASSY PART NO": ["THS0143301", "E0280014C01"],
-        "ASSY PART NAME": ["MX5 PCB", "Blower Board"],
+        "ASSY PART NAME": ["MX5 CCW", "Blower Board"],
         "2026년": [120000, 150000],
         "2027년": [150000, 180000],
         "2028년": [165000, 190000],
@@ -124,13 +124,12 @@ def init_monthly_plan():
     months = [f"{m}월" for m in range(1, 13)]
     init_data = {
         "ASSY PART NO": ["THS0143301", "E0280014C01"],
-        "ASSY PART NAME": ["MX5 PCB", "Blower Board"],
+        "ASSY PART NAME": ["MX5 CCW", "Blower Board"],
     }
     for m in months:
         init_data[m] = [12500, 15000]
     return pd.DataFrame(init_data)
 
-# 기존 세션에 ASSY PART NAME이 없으면 강제 재설정
 if "manual_yearly_plan" not in st.session_state or "ASSY PART NAME" not in st.session_state.manual_yearly_plan.columns:
     st.session_state.manual_yearly_plan = init_yearly_plan()
 
@@ -147,27 +146,22 @@ raw_df_bom = None
 with tab_bom_paste:
     sample_text = (
         "PART NO\tPART NAME\tEMS PN\tMPN\tManufacturer\tper unit\t통화\tprice\n"
-        "THS0143301\tMX5 PCB\tE0424-847-00\tAC0402FR-07100KL\tYAGEO\t10\tUSD\t0.00052\n"
-        "E0280014C01\tBlower Board\tE0424-847-00\tAC0402FR-07100KL\tYAGEO\t10\tUSD\t0.00052\n"
-        "THS0143301\tMX5 PCB\tF0483-185-00\tIPC100N04S5-2R8\tINFINEON\t7\tUSD\t0.21000\n"
-        "E0280014C01\tBlower Board\tF0483-185-00\tIPC100N04S5-2R8\tINFINEON\t7\tUSD\t0.21000\n"
-        "THS0143301\tMX5 PCB\tE0401-149-00\tHBY331M1ETR-1010KEGA\tLelon\t4\tUSD\t0.24000\n"
-        "THS0143301\tMX5 PCB\tE0405-009-00\t06031C103K4Z4A\tAVX\t4\tUSD\t0.00650"
+        "THS0143301\tMX5 CCW\tE6197-701-01\tLeiterplatte BLDC\t제이앤디써키트\t1\tKRW\t1900\n"
+        "THS0143301\tMX5 CCW\tE0424-847-00\tAC0402FR-07100KL\tYAGEO\t10\tUSD\t0.00052\n"
+        "THS0143301\tMX5 CCW\tF0483-185-00\tIPC100N04S5-2R8\tINFINEON\t7\tUSD\t0.21000\n"
+        "E0280014C01\tBlower Board\tE0424-847-00\tAC0402FR-07100KL\tYAGEO\t10\tUSD\t0.00052"
     )
     bom_input_text = st.text_area(
-        "엑셀에서 복사한 BOM을 붙여넣으세요 (제목 행 포함)",
+        "엑셀에서 복사한 BOM을 붙여넣으세요 (제목 행 없이 내용만 넣어도 자동 감지)",
         value=sample_text,
         height=180,
     )
     if bom_input_text.strip():
+        # 먼저 Tab으로 파싱 시도
         try:
-            raw_df_bom = pd.read_csv(
-                io.StringIO(bom_input_text), sep=r"\t", engine="python"
-            )
+            raw_df_bom = pd.read_csv(io.StringIO(bom_input_text), sep="\t", header=None, dtype=str)
         except Exception:
-            raw_df_bom = pd.read_csv(
-                io.StringIO(bom_input_text), sep=r"\s+", engine="python"
-            )
+            raw_df_bom = pd.read_csv(io.StringIO(bom_input_text), sep=r"\s+", header=None, dtype=str)
 
 with tab_bom_file:
     bom_file = st.file_uploader(
@@ -175,73 +169,91 @@ with tab_bom_file:
     )
     if bom_file:
         try:
-            raw_df_bom = pd.read_excel(bom_file)
+            raw_df_bom = pd.read_excel(bom_file, header=None, dtype=str)
         except Exception as e:
             st.error(f"엑셀 로드 실패: {e}")
 
-# --- 4. BOM 컬럼 매핑 및 정제 ---
+# --- 4. BOM 스마트 컬럼 감지 및 무적 매핑 ---
 df_bom = None
 detected_assys = []
 
 if raw_df_bom is not None and not raw_df_bom.empty:
-    df_bom = raw_df_bom.copy()
+    first_row = [str(x).strip().upper() for x in raw_df_bom.iloc[0].tolist()]
+    
+    # 첫 행이 헤더인지 여부 확인
+    header_keywords = ["PART NO", "ASSY", "모품번", "EMS PN", "PART NUMBER", "USAGE", "소요량", "PRICE", "단가"]
+    is_header_present = any(any(kw in cell for kw in header_keywords) for cell in first_row)
+    
+    if is_header_present:
+        headers = [str(x).strip() for x in raw_df_bom.iloc[0].tolist()]
+        data_df = raw_df_bom.iloc[1:].copy()
+        data_df.columns = headers
+    else:
+        # 제목 행 없이 데이터만 바로 복사한 경우: 열 순서로 자동 배치
+        data_df = raw_df_bom.copy()
+        default_headers = [
+            "ASSY PART NO", "ASSY PART NAME", "EMS PN", "MPN",
+            "제조사", "소요량", "통화", "단가", "원화단가"
+        ]
+        assigned_cols = default_headers[:len(data_df.columns)]
+        for i in range(len(assigned_cols), len(data_df.columns)):
+            assigned_cols.append(f"기타열_{i+1}")
+        data_df.columns = assigned_cols
+
+    df_bom = data_df.copy()
     df_bom.columns = [str(c).strip() for c in df_bom.columns]
 
+    # 별칭 매핑
     bom_col_map = {
-        "PART NO": "ASSY PART NO",
-        "PART_NO": "ASSY PART NO",
-        "ASSY_PN": "ASSY PART NO",
-        "모품번": "ASSY PART NO",
-        "PART NAME": "ASSY PART NAME",
-        "PART_NAME": "ASSY PART NAME",
-        "모품명": "ASSY PART NAME",
-        "Part Number": "EMS PN",
-        "part number": "EMS PN",
-        "자재번호": "EMS PN",
-        "하위품번": "EMS PN",
-        "EMS PN": "EMS PN",
-        "EMS_PN": "EMS PN",
-        "manufacturer part no.": "MPN",
-        "manufacturer part no": "MPN",
-        "제조사 PART NO": "MPN",
-        "MPN": "MPN",
-        "규격": "MPN",
-        "Manufacturer": "제조사",
-        "MANUFACTURER": "제조사",
-        "제조원": "제조사",
-        "Vendor": "제조사",
-        "per unit": "소요량",
-        "per_unit": "소요량",
-        "usage": "소요량",
-        "Usage": "소요량",
-        "소요량": "소요량",
-        "price": "단가",
-        "단가": "단가",
-        "단가(외화)": "단가",
+        "PART NO": "ASSY PART NO", "PART_NO": "ASSY PART NO", "ASSY_PN": "ASSY PART NO", "모품번": "ASSY PART NO",
+        "PART NAME": "ASSY PART NAME", "PART_NAME": "ASSY PART NAME", "모품명": "ASSY PART NAME",
+        "Part Number": "EMS PN", "part number": "EMS PN", "자재번호": "EMS PN", "하위품번": "EMS PN",
+        "EMS PN": "EMS PN", "EMS_PN": "EMS PN", "PART NUMBER": "EMS PN",
+        "manufacturer part no.": "MPN", "manufacturer part no": "MPN", "제조사 PART NO": "MPN",
+        "MPN": "MPN", "규격": "MPN", "제조사 PART NUMBER": "MPN",
+        "Manufacturer": "제조사", "MANUFACTURER": "제조사", "제조원": "제조사", "Vendor": "제조사",
+        "per unit": "소요량", "per_unit": "소요량", "usage": "소요량", "Usage": "소요량", "소요량": "소요량",
+        "price": "단가", "단가": "단가", "단가(외화)": "단가",
+        "통화": "통화", "CURRENCY": "통화", "원화": "원화단가", "원화단가": "원화단가"
     }
 
     for col in list(df_bom.columns):
-        if col in bom_col_map:
-            df_bom.rename(columns={col: bom_col_map[col]}, inplace=True)
-        elif col.lower() in [k.lower() for k in bom_col_map.keys()]:
-            for k, v in bom_col_map.items():
-                if col.lower() == k.lower():
-                    df_bom.rename(columns={col: v}, inplace=True)
-                    break
+        for k, v in bom_col_map.items():
+            if col.lower() == k.lower():
+                df_bom.rename(columns={col: v}, inplace=True)
+                break
 
+    # 필수 컬럼 강제 보정 (KeyError 원천 차단)
+    if "ASSY PART NO" not in df_bom.columns:
+        df_bom["ASSY PART NO"] = df_bom.iloc[:, 0].astype(str)
+    if "ASSY PART NAME" not in df_bom.columns:
+        if len(df_bom.columns) > 1:
+            df_bom["ASSY PART NAME"] = df_bom.iloc[:, 1].astype(str)
+        else:
+            df_bom["ASSY PART NAME"] = df_bom["ASSY PART NO"]
+    if "EMS PN" not in df_bom.columns:
+        if len(df_bom.columns) > 2:
+            df_bom["EMS PN"] = df_bom.iloc[:, 2].astype(str)
+        else:
+            df_bom["EMS PN"] = df_bom["ASSY PART NO"]
+    if "MPN" not in df_bom.columns:
+        if len(df_bom.columns) > 3:
+            df_bom["MPN"] = df_bom.iloc[:, 3].astype(str)
+        else:
+            df_bom["MPN"] = df_bom["EMS PN"]
+    if "제조사" not in df_bom.columns:
+        df_bom["제조사"] = "-"
+    if "소요량" not in df_bom.columns:
+        df_bom["소요량"] = 1.0
     if "통화" not in df_bom.columns:
         df_bom["통화"] = "KRW"
-    else:
-        df_bom["통화"] = (
-            df_bom["통화"].astype(str).str.strip().str.upper().fillna("KRW")
-        )
+    if "단가" not in df_bom.columns:
+        df_bom["단가"] = 0.0
 
-    df_bom["소요량"] = pd.to_numeric(
-        df_bom.get("소요량", 1.0), errors="coerce"
-    ).fillna(1.0)
-    df_bom["단가"] = pd.to_numeric(
-        df_bom.get("단가", 0.0), errors="coerce"
-    ).fillna(0.0)
+    # 숫자형 정제 (콤마 제거 후 변환)
+    df_bom["소요량"] = pd.to_numeric(df_bom["소요량"].astype(str).str.replace(",", "").str.strip(), errors="coerce").fillna(1.0)
+    df_bom["단가"] = pd.to_numeric(df_bom["단가"].astype(str).str.replace(",", "").str.strip(), errors="coerce").fillna(0.0)
+    df_bom["통화"] = df_bom["통화"].astype(str).str.strip().str.upper().fillna("KRW")
 
     def calc_krw_unit_price(row):
         curr = str(row["통화"]).upper()
@@ -259,20 +271,14 @@ if raw_df_bom is not None and not raw_df_bom.empty:
 
     df_bom["원화단가"] = df_bom.apply(calc_krw_unit_price, axis=1)
 
-    if "제조사" not in df_bom.columns:
-        df_bom["제조사"] = "-"
-    if "MPN" not in df_bom.columns:
-        df_bom["MPN"] = df_bom.get("EMS PN", "-")
-    if "ASSY PART NAME" not in df_bom.columns:
-        df_bom["ASSY PART NAME"] = df_bom.get("ASSY PART NO", "-")
-
+    # 고유 Assy 리스트 추출
     detected_assys = (
         df_bom[["ASSY PART NO", "ASSY PART NAME"]]
         .drop_duplicates()
         .to_dict(orient="records")
     )
 
-# --- 5. 영역 2: 생산계획 (품번/품명 칸 분리 & KeyError 방어) ---
+# --- 5. 영역 2: 생산계획 ---
 st.markdown("---")
 st.subheader("2. 생산 계획 관리 (품번/품명 분리 및 수기 입력 / 엑셀 업로드)")
 
@@ -298,9 +304,9 @@ if plan_input_type == "✍️ 화면에서 수기 직접 입력 (스프레드시
 
         if detected_assys:
             for item in detected_assys:
-                a_pn = item["ASSY PART NO"]
-                a_name = item["ASSY PART NAME"]
-                if a_pn not in curr_df["ASSY PART NO"].values:
+                a_pn = str(item["ASSY PART NO"])
+                a_name = str(item["ASSY PART NAME"])
+                if a_pn not in curr_df["ASSY PART NO"].astype(str).values:
                     new_row = {
                         col: 0
                         for col in curr_df.columns
@@ -312,14 +318,12 @@ if plan_input_type == "✍️ 화면에서 수기 직접 입력 (스프레드시
                         [curr_df, pd.DataFrame([new_row])], ignore_index=True
                     )
 
-        st.caption(
-            "💡 품번 및 품명과 각 연도별 수량을 더블 클릭해 직접 수정할 수 있습니다."
-        )
+        st.caption("💡 각 연도별 수량을 더블 클릭해 직접 수정할 수 있습니다.")
         edited_plan = st.data_editor(
             curr_df,
             num_rows="dynamic",
             use_container_width=True,
-            key="editor_yearly_v2",
+            key="editor_yearly_v3",
         )
         st.session_state.manual_yearly_plan = edited_plan
 
@@ -341,9 +345,9 @@ if plan_input_type == "✍️ 화면에서 수기 직접 입력 (스프레드시
 
         if detected_assys:
             for item in detected_assys:
-                a_pn = item["ASSY PART NO"]
-                a_name = item["ASSY PART NAME"]
-                if a_pn not in curr_df["ASSY PART NO"].values:
+                a_pn = str(item["ASSY PART NO"])
+                a_name = str(item["ASSY PART NAME"])
+                if a_pn not in curr_df["ASSY PART NO"].astype(str).values:
                     new_row = {
                         col: 0
                         for col in curr_df.columns
@@ -355,14 +359,12 @@ if plan_input_type == "✍️ 화면에서 수기 직접 입력 (스프레드시
                         [curr_df, pd.DataFrame([new_row])], ignore_index=True
                     )
 
-        st.caption(
-            "💡 품번 및 품명과 1월~12월 수량을 직접 수정할 수 있습니다."
-        )
+        st.caption("💡 1월~12월 수량을 직접 수정할 수 있습니다.")
         edited_plan = st.data_editor(
             curr_df,
             num_rows="dynamic",
             use_container_width=True,
-            key="editor_monthly_v2",
+            key="editor_monthly_v3",
         )
         st.session_state.manual_monthly_plan = edited_plan
 
@@ -387,17 +389,9 @@ else:
             excel_p.columns = [str(c).strip() for c in excel_p.columns]
 
             if "ASSY PART NO" not in excel_p.columns:
-                excel_p.rename(
-                    columns={excel_p.columns[0]: "ASSY PART NO"}, inplace=True
-                )
-            if (
-                len(excel_p.columns) > 1
-                and "ASSY PART NAME" not in excel_p.columns
-                and not any(char.isdigit() for char in str(excel_p.columns[1]))
-            ):
-                excel_p.rename(
-                    columns={excel_p.columns[1]: "ASSY PART NAME"}, inplace=True
-                )
+                excel_p.rename(columns={excel_p.columns[0]: "ASSY PART NO"}, inplace=True)
+            if len(excel_p.columns) > 1 and "ASSY PART NAME" not in excel_p.columns and not any(char.isdigit() for char in str(excel_p.columns[1])):
+                excel_p.rename(columns={excel_p.columns[1]: "ASSY PART NAME"}, inplace=True)
             else:
                 if "ASSY PART NAME" not in excel_p.columns:
                     excel_p["ASSY PART NAME"] = excel_p["ASSY PART NO"]
@@ -419,10 +413,10 @@ else:
 # --- 6. 결과 연산 및 표시 ---
 if df_bom is not None and plan_unpivoted is not None and not plan_unpivoted.empty:
     plan_unpivoted["Plan_Qty"] = pd.to_numeric(
-        plan_unpivoted["Plan_Qty"], errors="coerce"
+        plan_unpivoted["Plan_Qty"].astype(str).str.replace(",", ""), errors="coerce"
     ).fillna(0)
 
-    # 품번 기준 Merge (생산계획 품명 우선, 없을 경우 BOM 품명)
+    # 품번 기준 Join
     bom_match = df_bom.drop(columns=["ASSY PART NAME"], errors="ignore")
     merged = pd.merge(plan_unpivoted, bom_match, on="ASSY PART NO", how="inner")
 
@@ -430,9 +424,7 @@ if df_bom is not None and plan_unpivoted is not None and not plan_unpivoted.empt
         merged["ASSY PART NAME"] = merged["ASSY PART NO"]
 
     if merged.empty:
-        st.warning(
-            "⚠️ 생산계획의 'ASSY PART NO'와 BOM의 'ASSY PART NO'가 일치하지 않습니다."
-        )
+        st.warning("⚠️ 생산계획의 'ASSY PART NO'와 BOM의 'ASSY PART NO'가 일치하지 않습니다. 상단 표의 품번을 확인해 주십시오.")
     else:
         merged["필요수량"] = merged["Plan_Qty"] * merged["소요량"]
         merged["원화_총금액"] = merged["필요수량"] * merged["원화단가"]
@@ -456,16 +448,9 @@ if df_bom is not None and plan_unpivoted is not None and not plan_unpivoted.empt
         # 메트릭 카드
         col_m1, col_m2, col_m3, col_m4 = st.columns(4)
         col_m1.metric("선택 주기", sel_period)
-        col_m2.metric(
-            "투입 소자 품목 수", f"{curr_view['EMS PN'].nunique():,} 종"
-        )
-        col_m3.metric(
-            "총 필요 소요 수량", f"{int(curr_view['필요수량'].sum()):,} EA"
-        )
-        col_m4.metric(
-            "원화 환산 총 구매금액",
-            f"{int(curr_view['원화_총금액'].sum()):,} 원",
-        )
+        col_m2.metric("투입 소자 품목 수", f"{curr_view['EMS PN'].nunique():,} 종")
+        col_m3.metric("총 필요 소요 수량", f"{int(curr_view['필요수량'].sum()):,} EA")
+        col_m4.metric("원화 환산 총 구매금액", f"{int(curr_view['원화_총금액'].sum()):,} 원")
 
         if view_opt == "소자(EMS PN)별 공용품 집계":
             summary_rows = []
@@ -481,11 +466,8 @@ if df_bom is not None and plan_unpivoted is not None and not plan_unpivoted.empt
 
                 total_qty = int(group["필요수량"].sum())
                 total_krw = int(group["원화_총금액"].sum())
-                is_common = (
-                    "🟢 공용 부품" if len(g_assy) > 1 else "⚪ 전용 부품"
-                )
+                is_common = "🟢 공용 부품" if len(g_assy) > 1 else "⚪ 전용 부품"
 
-                # HTML 뱃지/줄바꿈 블록 생성
                 html_assy_pn = "<br>".join([
                     f"<span style='background-color: #2b2d30; padding: 2px 8px; border-radius: 4px; display: inline-block; margin: 2px 0;'>{a}</span>"
                     for a in g_assy["ASSY PART NO"]
@@ -503,15 +485,10 @@ if df_bom is not None and plan_unpivoted is not None and not plan_unpivoted.empt
                     for q in g_assy["필요수량"]
                 ])
 
-                # 엑셀 다운로드용 텍스트
                 raw_assy_pn = "\n".join(g_assy["ASSY PART NO"].astype(str))
                 raw_assy_name = "\n".join(g_assy["ASSY PART NAME"].astype(str))
-                raw_usage = "\n".join(
-                    g_assy["소요량"].apply(lambda x: f"{x:g}")
-                )
-                raw_qty = "\n".join(
-                    g_assy["필요수량"].apply(lambda x: f"{int(x):,}")
-                )
+                raw_usage = "\n".join(g_assy["소요량"].apply(lambda x: f"{x:g}"))
+                raw_qty = "\n".join(g_assy["필요수량"].apply(lambda x: f"{int(x):,}"))
 
                 summary_rows.append({
                     "EMS PN": ems_pn,
@@ -540,19 +517,9 @@ if df_bom is not None and plan_unpivoted is not None and not plan_unpivoted.empt
             )
 
             table_cols = [
-                "EMS PN",
-                "MPN",
-                "제조사",
-                "구분",
-                "적용 ASSY 품번",
-                "적용 ASSY 품명",
-                "단위소요량(Usage)",
-                "ASSY별 소요물량",
-                f"총 필요 수량 ({sel_period})",
-                "통화",
-                "외화단가",
-                "원화단가(환율적용)",
-                "총 소요금액 (원화)",
+                "EMS PN", "MPN", "제조사", "구분",
+                "적용 ASSY 품번", "적용 ASSY 품명", "단위소요량(Usage)", "ASSY별 소요물량",
+                f"총 필요 수량 ({sel_period})", "통화", "외화단가", "원화단가(환율적용)", "총 소요금액 (원화)"
             ]
 
             html_table = """
@@ -571,73 +538,40 @@ if df_bom is not None and plan_unpivoted is not None and not plan_unpivoted.empt
             for _, r in df_summary.iterrows():
                 html_table += "<tr>"
                 for col in table_cols:
-                    align = (
-                        "right"
-                        if "금액" in col or "수량" in col or "단가" in col
-                        else "left"
-                    )
-                    html_table += (
-                        f"<td style='text-align: {align};'>{r[col]}</td>"
-                    )
+                    align = "right" if ("금액" in col or "수량" in col or "단가" in col) else "left"
+                    html_table += f"<td style='text-align: {align};'>{r[col]}</td>"
                 html_table += "</tr>"
             html_table += "</tbody></table>"
 
             st.markdown(html_table, unsafe_allow_html=True)
 
             excel_df = df_summary[[
-                "EMS PN",
-                "MPN",
-                "제조사",
-                "구분",
-                "_raw_assy_pn",
-                "_raw_assy_name",
-                "_raw_usage",
-                "_raw_qty",
-                "_total_qty_num",
-                "통화",
-                "외화단가",
-                "원화단가(환율적용)",
-                "_raw_krw",
-            ]].rename(
-                columns={
-                    "_raw_assy_pn": "적용 ASSY 품번",
-                    "_raw_assy_name": "적용 ASSY 품명",
-                    "_raw_usage": "단위소요량(Usage)",
-                    "_raw_qty": "ASSY별 소요물량",
-                    "_total_qty_num": f"총 필요 수량 ({sel_period})",
-                    "_raw_krw": "총 소요금액 (원화)",
-                }
-            )
+                "EMS PN", "MPN", "제조사", "구분",
+                "_raw_assy_pn", "_raw_assy_name", "_raw_usage", "_raw_qty",
+                "_total_qty_num", "통화", "외화단가", "원화단가(환율적용)", "_raw_krw"
+            ]].rename(columns={
+                "_raw_assy_pn": "적용 ASSY 품번",
+                "_raw_assy_name": "적용 ASSY 품명",
+                "_raw_usage": "단위소요량(Usage)",
+                "_raw_qty": "ASSY별 소요물량",
+                "_total_qty_num": f"총 필요 수량 ({sel_period})",
+                "_raw_krw": "총 소요금액 (원화)"
+            })
 
         else:
             final_cols = [
-                "ASSY PART NO",
-                "ASSY PART NAME",
-                "EMS PN",
-                "MPN",
-                "제조사",
-                "소요량",
-                "필요수량",
-                "통화",
-                "단가",
-                "원화단가",
-                "원화_총금액",
+                "ASSY PART NO", "ASSY PART NAME", "EMS PN", "MPN", "제조사",
+                "소요량", "필요수량", "통화", "단가", "원화단가", "원화_총금액"
             ]
-            curr_view["필요수량"] = (
-                curr_view["필요수량"].apply(np.ceil).astype(int)
-            )
-            curr_view["원화_총금액"] = (
-                curr_view["원화_총금액"].apply(np.ceil).astype(int)
-            )
-            excel_df = curr_view[final_cols].rename(
-                columns={
-                    "소요량": "단위소요량(Usage)",
-                    "필요수량": f"필요 수량 ({sel_period})",
-                    "단가": "외화단가",
-                    "원화단가": "원화단가(환율적용)",
-                    "원화_총금액": "총 소요금액 (원화)",
-                }
-            ).sort_values(by=f"필요 수량 ({sel_period})", ascending=False)
+            curr_view["필요수량"] = curr_view["필요수량"].apply(np.ceil).astype(int)
+            curr_view["원화_총금액"] = curr_view["원화_총금액"].apply(np.ceil).astype(int)
+            excel_df = curr_view[final_cols].rename(columns={
+                "소요량": "단위소요량(Usage)",
+                "필요수량": f"필요 수량 ({sel_period})",
+                "단가": "외화단가",
+                "원화단가": "원화단가(환율적용)",
+                "원화_총금액": "총 소요금액 (원화)"
+            }).sort_values(by=f"필요 수량 ({sel_period})", ascending=False)
 
             st.dataframe(
                 excel_df.style.format({
@@ -656,13 +590,7 @@ if df_bom is not None and plan_unpivoted is not None and not plan_unpivoted.empt
             pivot_matrix = (
                 pd.pivot_table(
                     merged,
-                    index=[
-                        "EMS PN",
-                        "MPN",
-                        "제조사",
-                        "통화",
-                        "원화단가",
-                    ],
+                    index=["EMS PN", "MPN", "제조사", "통화", "원화단가"],
                     columns="Period",
                     values="필요수량",
                     aggfunc="sum",
@@ -677,12 +605,8 @@ if df_bom is not None and plan_unpivoted is not None and not plan_unpivoted.empt
         # 엑셀 다운로드
         out_buf = io.BytesIO()
         with pd.ExcelWriter(out_buf, engine="openpyxl") as writer:
-            excel_df.to_excel(
-                writer, sheet_name=f"요약_{sel_period}", index=False
-            )
-            pivot_matrix.to_excel(
-                writer, sheet_name="주기별_전체매트릭스", index=False
-            )
+            excel_df.to_excel(writer, sheet_name=f"요약_{sel_period}", index=False)
+            pivot_matrix.to_excel(writer, sheet_name="주기별_전체매트릭스", index=False)
 
         st.download_button(
             label=f"📥 [{sel_period}] 결과 엑셀 다운로드",
